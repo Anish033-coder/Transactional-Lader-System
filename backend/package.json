@@ -4,7 +4,7 @@
   "description": "Lader-System-Backend",
   "main": "index.js",
   "scripts": {
-   "start": "node src/index.js",
+    "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "migrate": "knex migrate:latest"
   },
@@ -18,6 +18,8 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "knex": "^3.2.9",
     "pg": "^8.20.0",
