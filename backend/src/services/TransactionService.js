@@ -1,6 +1,6 @@
 const { db } = require('../db/db')
 
-async function transfer(fromAccountId, toAccountId, amount, note, userId) {
+async function transfer(fromAccountId, toAccountId, amount, note, userId, idempotencyKey) {
 
   const transferAmount = parseFloat(amount)
 
@@ -16,18 +16,60 @@ async function transfer(fromAccountId, toAccountId, amount, note, userId) {
     throw error
   }
 
-  const transaction = await db.transaction(async function(trx) {
+  if (idempotencyKey) {
 
-    const fromAccount = await trx('accounts')
-      .where({
-        id: fromAccountId,
-        user_id: userId
-      })
+    const existingTransaction = await db('transactions')
+      .where({ idempotency_key: idempotencyKey })
       .first()
 
+    if (existingTransaction) {
+      console.log('Idempotency hit - returning existing transaction:', existingTransaction.id)
+      const senderAccount = await db('accounts')
+        .where({ id: fromAccountId })
+        .first()
+
+      return {
+        transaction: existingTransaction,
+        newBalance: senderAccount.balance,
+        replayed: true   
+      }
+    }
+  }
+
+  const result = await db.transaction(async function(trx) {
+
+    const lockedAccounts = await trx.raw(`
+      SELECT * FROM accounts
+      WHERE id IN (?, ?)
+      ORDER BY id
+      FOR UPDATE
+    `, [fromAccountId, toAccountId])
+
+    const rows = lockedAccounts.rows
+
+    const fromAccount = rows.find(function(row) {
+      return row.id === fromAccountId
+    })
+
+    const toAccount = rows.find(function(row) {
+      return row.id === toAccountId
+    })
+
     if (!fromAccount) {
-      const error = new Error('Source account not found or does not belong to you')
+      const error = new Error('Source account not found')
       error.code = 'ACCOUNT_NOT_FOUND'
+      throw error
+    }
+
+    if (fromAccount.user_id !== userId) {
+      const error = new Error('Source account does not belong to you')
+      error.code = 'ACCOUNT_NOT_FOUND'
+      throw error
+    }
+
+    if (!toAccount) {
+      const error = new Error('Destination account not found')
+      error.code = 'DEST_NOT_FOUND'
       throw error
     }
 
@@ -37,70 +79,84 @@ async function transfer(fromAccountId, toAccountId, amount, note, userId) {
       throw error
     }
 
-    const toAccount = await trx('accounts')
-      .where({ id: toAccountId })
-      .first()
-
-    if (!toAccount) {
-      const error = new Error('Destination account not found')
-      error.code = 'DEST_NOT_FOUND'
-      throw error
-    }
-
     if (toAccount.status !== 'ACTIVE') {
       const error = new Error('Destination account is not active')
       error.code = 'DEST_INACTIVE'
       throw error
     }
 
-    const currentBalance = parseFloat(fromAccount.balance)
+    const fromBalance = parseFloat(fromAccount.balance)
+    const toBalance = parseFloat(toAccount.balance)
 
-    if (currentBalance < transferAmount) {
+    if (fromBalance < transferAmount) {
       const error = new Error('You do not have enough balance for this transfer')
       error.code = 'INSUFFICIENT_FUNDS'
       throw error
     }
 
-    const newFromBalance = currentBalance - transferAmount
-    const newToBalance = parseFloat(toAccount.balance) + transferAmount
+    const newFromBalance = fromBalance - transferAmount
+    const newToBalance = toBalance + transferAmount
+
+    const newTransactions = await trx('transactions')
+      .insert({
+        from_account_id:  fromAccountId,
+        to_account_id:    toAccountId,
+        amount:           transferAmount.toFixed(8),
+        type:             'TRANSFER',
+        status:           'COMPLETED',
+        note:             note || null,
+        idempotency_key:  idempotencyKey || null,
+        completed_at:     new Date()
+      })
+      .returning('*')
+
+    const transaction = newTransactions[0]
 
     await trx('accounts')
       .where({ id: fromAccountId })
       .update({
-        balance: newFromBalance.toFixed(8),  
+        balance:    newFromBalance.toFixed(8),
         updated_at: new Date()
       })
 
     await trx('accounts')
       .where({ id: toAccountId })
       .update({
-        balance: newToBalance.toFixed(8),
+        balance:    newToBalance.toFixed(8),
         updated_at: new Date()
       })
 
-    const newTransactions = await trx('transactions')
-      .insert({
-        from_account_id: fromAccountId,
-        to_account_id: toAccountId,
-        amount: transferAmount.toFixed(8),
-        type: 'TRANSFER',
-        status: 'COMPLETED',
-        note: note || null,
-        completed_at: new Date()
-      })
-      .returning('*')
+
+    await trx('ledger_entries').insert([
+      {
+
+        transaction_id: transaction.id,
+        account_id:     fromAccountId,
+        entry_type:     'DEBIT',
+        amount:         transferAmount.toFixed(8),
+        balance_after:  newFromBalance.toFixed(8)  
+      },
+      {
+        transaction_id: transaction.id,
+        account_id:     toAccountId,
+        entry_type:     'CREDIT',
+        amount:         transferAmount.toFixed(8),
+        balance_after:  newToBalance.toFixed(8)     
+      }
+    ])
 
     return {
-      transaction: newTransactions[0],
-      newBalance: newFromBalance.toFixed(8)
+      transaction: transaction,
+      newBalance:  newFromBalance.toFixed(8),
+      replayed:    false
     }
 
   })
 
-  return transaction
+  return result
 }
 
-async function deposit(accountId, amount, note, userId) {
+async function deposit(accountId, amount, note, userId, idempotencyKey) {
 
   const depositAmount = parseFloat(amount)
 
@@ -110,17 +166,42 @@ async function deposit(accountId, amount, note, userId) {
     throw error
   }
 
-  const result = await db.transaction(async function(trx) {
-
-    const account = await trx('accounts')
-      .where({
-        id: accountId,
-        user_id: userId
-      })
+  if (idempotencyKey) {
+    const existingTransaction = await db('transactions')
+      .where({ idempotency_key: idempotencyKey })
       .first()
 
+    if (existingTransaction) {
+      console.log('Idempotency hit for deposit:', existingTransaction.id)
+
+      const account = await db('accounts').where({ id: accountId }).first()
+
+      return {
+        transaction: existingTransaction,
+        newBalance:  account.balance,
+        replayed:    true
+      }
+    }
+  }
+
+  const result = await db.transaction(async function(trx) {
+
+    const lockedAccounts = await trx.raw(`
+      SELECT * FROM accounts
+      WHERE id = ?
+      FOR UPDATE
+    `, [accountId])
+
+    const account = lockedAccounts.rows[0]
+
     if (!account) {
-      const error = new Error('Account not found or does not belong to you')
+      const error = new Error('Account not found')
+      error.code = 'ACCOUNT_NOT_FOUND'
+      throw error
+    }
+
+    if (account.user_id !== userId) {
+      const error = new Error('Account does not belong to you')
       error.code = 'ACCOUNT_NOT_FOUND'
       throw error
     }
@@ -131,30 +212,43 @@ async function deposit(accountId, amount, note, userId) {
       throw error
     }
 
-    const newBalance = parseFloat(account.balance) + depositAmount
+    const currentBalance = parseFloat(account.balance)
+    const newBalance = currentBalance + depositAmount
+
+    const newTransactions = await trx('transactions')
+      .insert({
+        from_account_id: null,          
+        to_account_id:   accountId,
+        amount:          depositAmount.toFixed(8),
+        type:            'DEPOSIT',
+        status:          'COMPLETED',
+        note:            note || null,
+        idempotency_key: idempotencyKey || null,
+        completed_at:    new Date()
+      })
+      .returning('*')
+
+    const transaction = newTransactions[0]
 
     await trx('accounts')
       .where({ id: accountId })
       .update({
-        balance: newBalance.toFixed(8),
+        balance:    newBalance.toFixed(8),
         updated_at: new Date()
       })
 
-    const newTransactions = await trx('transactions')
-      .insert({
-        from_account_id: null,      
-        to_account_id: accountId,
-        amount: depositAmount.toFixed(8),
-        type: 'DEPOSIT',
-        status: 'COMPLETED',
-        note: note || null,
-        completed_at: new Date()
-      })
-      .returning('*')
+    await trx('ledger_entries').insert({
+      transaction_id: transaction.id,
+      account_id:     accountId,
+      entry_type:     'CREDIT',
+      amount:         depositAmount.toFixed(8),
+      balance_after:  newBalance.toFixed(8)
+    })
 
     return {
-      transaction: newTransactions[0],
-      newBalance: newBalance.toFixed(8)
+      transaction: transaction,
+      newBalance:  newBalance.toFixed(8),
+      replayed:    false
     }
 
   })
