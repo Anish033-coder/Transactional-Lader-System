@@ -1,40 +1,71 @@
-const express = require('express')
-const cors = require('cors')
+const express    = require('express')
+const cors       = require('cors')
+const helmet     = require('helmet')
+const rateLimit  = require('express-rate-limit')
 require('dotenv').config()
 
-const authRoutes = require('./routes/auth')
-const accountRoutes = require('./routes/accounts')
-const transactionRoutes = require('./routes/transactions')
+const authRoutes           = require('./routes/auth')
+const accountRoutes        = require('./routes/accounts')
+const transactionRoutes    = require('./routes/transactions')
+const reconciliationRoutes = require('./routes/reconciliation')
 
 const app = express()
 
+app.use(helmet())
 app.use(cors())
 
 app.use(express.json())
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   
+  max: 20,                  
+  message: {
+    error: {
+      code:    'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests, please try again after 15 minutes'
+    }
+  },
+  standardHeaders: true,
+  legacyHeaders:   false
+})
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: {
+    error: {
+      code:    'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests, please try again after 15 minutes'
+    }
+  },
+  standardHeaders: true,
+  legacyHeaders:   false
+})
+
 app.get('/health', function(req, res) {
   res.status(200).json({
-    status: 'ok',
+    status:  'ok',
     message: 'Server is running',
-    time: new Date().toISOString()
+    time:    new Date().toISOString()
   })
 })
 
-app.use('/api/v1/auth', authRoutes)
-app.use('/api/v1/accounts', accountRoutes)
-app.use('/api/v1/transactions', transactionRoutes)
+app.use('/api/v1/auth',           authLimiter,    authRoutes)
+app.use('/api/v1/accounts',       generalLimiter, accountRoutes)
+app.use('/api/v1/transactions',   generalLimiter, transactionRoutes)
+app.use('/api/v1/reconciliation', generalLimiter, reconciliationRoutes)
 
 app.use(function(req, res) {
   res.status(404).json({
     error: {
-      code: 'NOT_FOUND',
+      code:    'NOT_FOUND',
       message: 'This endpoint does not exist'
     }
   })
 })
 
 app.use(function(err, req, res, next) {
-
+  
   console.error('Error:', err.message)
 
   const statusCodes = {
@@ -48,18 +79,17 @@ app.use(function(err, req, res, next) {
     'INVALID_CREDENTIALS': 401,
     'FORBIDDEN':           403,
     'ACCOUNT_INACTIVE':    422,
-    'DEST_INACTIVE':       422,
+    'DEST_INACTIVE':       422
   }
 
   const statusCode = statusCodes[err.code] || 500
-
-  const message = statusCode === 500
+  const message    = statusCode === 500
     ? 'Something went wrong on our end'
     : err.message
 
   res.status(statusCode).json({
     error: {
-      code: err.code || 'INTERNAL_ERROR',
+      code:    err.code || 'INTERNAL_ERROR',
       message: message
     }
   })
@@ -69,6 +99,6 @@ app.use(function(err, req, res, next) {
 const PORT = process.env.PORT || 3001
 
 app.listen(PORT, function() {
-  console.log('Server started on port ' + PORT)
-  console.log('Health check: http://localhost:' + PORT + '/health')
+  console.log('Server running on port ' + PORT)
+  console.log('Health: http://localhost:' + PORT + '/health')
 })
