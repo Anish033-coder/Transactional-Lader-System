@@ -1,10 +1,10 @@
+require('dotenv').config()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { db } = require('../db/db')
 
 
 async function register(email, password) {
-
   const existingUser = await db('users').where({ email: email }).first()
 
   if (existingUser) {
