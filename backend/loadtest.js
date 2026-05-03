@@ -1,32 +1,5 @@
-// load test script
-// this proves that our SELECT FOR UPDATE works correctly
-//
-// what this test does:
-//   1. registers two test users (anish and rahul)
-//   2. deposits 10000 rupees into anish's account
-//   3. fires 20 concurrent transfer requests of 100 rupees each
-//      from anish to rahul AT THE SAME TIME
-//   4. waits for all to finish
-//   5. checks the final balances
-//
-// what CORRECT behavior looks like:
-//   anish started with 10000, sent 100 x 20 = 2000
-//   anish final balance: 8000
-//   rahul final balance: 2000 (he started with 0)
-//   total money: 10000 (unchanged - no money created or destroyed)
-//
-// without SELECT FOR UPDATE (Phase 1):
-//   some transfers might read the same balance simultaneously
-//   and both think there is enough money when there isn't
-//   result: incorrect balances, money created out of nothing
-//
-// with SELECT FOR UPDATE (Phase 2):
-//   all transfers are serialized correctly
-//   result: exact balances every single time
-
 const BASE_URL = 'http://localhost:3001/api/v1'
 
-// simple fetch wrapper
 async function post(path, body, token, idempotencyKey) {
   const headers = {
     'Content-Type': 'application/json'
@@ -56,20 +29,16 @@ async function get(path, token) {
   return response.json()
 }
 
-// generate a random unique string for idempotency keys and email
 function randomId() {
   return Math.random().toString(36).substring(2, 15)
 }
 
 async function runLoadTest() {
 
-  console.log('=== PHASE 2 LOAD TEST ===')
+
   console.log('Testing SELECT FOR UPDATE concurrency safety\n')
 
-  // ── SETUP ──────────────────────────────────────────────
-
-  // register anish (sender)
-  const anishEmail = 'anish_' + randomId() + '@test.com'
+const anishEmail = 'anish_' + randomId() + '@test.com'
   const anishReg   = await post('/auth/register', {
     email:    anishEmail,
     password: 'password123'
@@ -84,7 +53,6 @@ async function runLoadTest() {
   const anishAccountId = anishReg.data.account.id
   console.log('Registered anish. Account ID:', anishAccountId)
 
-  // register rahul (receiver)
   const rahulEmail = 'rahul_' + randomId() + '@test.com'
   const rahulReg   = await post('/auth/register', {
     email:    rahulEmail,
@@ -94,7 +62,6 @@ async function runLoadTest() {
   const rahulAccountId = rahulReg.data.account.id
   console.log('Registered rahul. Account ID:', rahulAccountId)
 
-  // deposit 10000 rupees into anish's account
   await post('/transactions/deposit', {
     accountId: anishAccountId,
     amount:    '10000',
@@ -104,19 +71,14 @@ async function runLoadTest() {
   console.log('Deposited 10000 into anish account')
   console.log('\nFiring 20 concurrent transfers of 100 rupees each...')
 
-  // ── LOAD TEST ──────────────────────────────────────────
-
   const TRANSFER_COUNT  = 20
   const TRANSFER_AMOUNT = '100'
 
-  // create all 20 transfer promises at the same time
-  // Promise.allSettled waits for ALL to finish even if some fail
   const startTime = Date.now()
 
   const transferPromises = []
 
   for (let i = 0; i < TRANSFER_COUNT; i++) {
-    // each transfer has a unique idempotency key
     const promise = post('/transactions/transfer', {
       fromAccountId: anishAccountId,
       toAccountId:   rahulAccountId,
@@ -127,13 +89,11 @@ async function runLoadTest() {
     transferPromises.push(promise)
   }
 
-  // fire all 20 AT THE SAME TIME
   const results = await Promise.allSettled(transferPromises)
 
   const endTime     = Date.now()
   const duration    = endTime - startTime
 
-  // count successes and failures
   let successCount = 0
   let failCount    = 0
 
@@ -150,9 +110,7 @@ async function runLoadTest() {
   console.log('Successful:        ', successCount, '/ ' + TRANSFER_COUNT)
   console.log('Failed:            ', failCount, '/ ' + TRANSFER_COUNT)
 
-  // ── VERIFY BALANCES ────────────────────────────────────
-
-  // get final balances
+  
   const anishAccounts = await get('/accounts', anishToken)
   const rahulAccounts = await get('/accounts', rahulReg.data.token)
 
@@ -171,7 +129,7 @@ async function runLoadTest() {
 
   console.log('\n=== ASSERTIONS ===')
 
-  // ASSERTION 1: no money created or destroyed
+ 
   if (Math.abs(totalMoney - expectedTotal) < 0.01) {
     console.log('PASS - Total money conserved:', totalMoney, '=== 10000')
   } else {
@@ -179,7 +137,6 @@ async function runLoadTest() {
     console.log('       Expected:', expectedTotal, ' Got:', totalMoney)
   }
 
-  // ASSERTION 2: anish balance is correct
   if (Math.abs(anishBalance - expectedAnishBalance) < 0.01) {
     console.log('PASS - Anish balance correct:', anishBalance)
   } else {
@@ -187,7 +144,6 @@ async function runLoadTest() {
     console.log('       Expected:', expectedAnishBalance, ' Got:', anishBalance)
   }
 
-  // ASSERTION 3: rahul balance is correct
   if (Math.abs(rahulBalance - expectedRahulBalance) < 0.01) {
     console.log('PASS - Rahul balance correct:', rahulBalance)
   } else {
@@ -195,14 +151,12 @@ async function runLoadTest() {
     console.log('       Expected:', expectedRahulBalance, ' Got:', rahulBalance)
   }
 
-  // ASSERTION 4: no negative balances
   if (anishBalance >= 0 && rahulBalance >= 0) {
     console.log('PASS - No negative balances')
   } else {
     console.log('FAIL - Negative balance detected!')
   }
 
-  // run reconciliation to verify ledger integrity
   console.log('\n=== RECONCILIATION CHECK ===')
   const reconciliation = await get('/reconciliation/run', anishToken)
 
@@ -216,7 +170,6 @@ async function runLoadTest() {
   console.log('\n=== LOAD TEST COMPLETE ===')
 }
 
-// run the test
 runLoadTest().catch(function(err) {
   console.error('Load test failed:', err.message)
 })
