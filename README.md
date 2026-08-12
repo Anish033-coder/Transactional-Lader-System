@@ -35,7 +35,7 @@ A full-stack financial transaction system built with Node.js, PostgreSQL, and Re
 
 | Service | Link |
 |---|---|
-| **Frontend** | [Live App](https://transactional-ledger-system.vercel.app) |
+| **Frontend** | [Live App](https://transactional-lader-system.vercel.app/) |
 | **Backend API** | [API Endpoint](https://strong-essence-production-0575.up.railway.app) |
 | **Health Check** | [Health Status](https://strong-essence-production-0575.up.railway.app/health) |
 
